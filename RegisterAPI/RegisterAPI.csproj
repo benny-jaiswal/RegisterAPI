@@ -24,4 +24,8 @@
     <ProjectReference Include="..\RegisterAPI.Infrastructure\RegisterAPI.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="scripts\" />
+  </ItemGroup>
+
 </Project>

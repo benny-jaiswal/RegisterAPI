@@ -1,0 +1,97 @@
+﻿# azure-pipelines.yml (CI + CD - Bitbucket to ACR + AKS)
+trigger:
+  branches:
+    include:
+      - main
+      - dev
+      - uat
+
+variables:
+  environment: 'dev'  # Can be overridden at runtime
+  location: 'East US'
+  projectName: 'myapi'
+  tag: '$(Build.BuildId)'
+  acrServiceConnection: 'acr-myapi-svc'
+  azureSubscription: 'MyAzureSubscription'
+  resourceGroup: 'rg-myapi'
+  acrName: 'acrsharedmyapi'
+  aksCluster: 'aks-myapi'
+
+stages:
+- stage: ProvisionInfra
+  displayName: Deploy Infra with Bicep
+  jobs:
+  - job: DeployACR
+    displayName: Deploy ACR
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: '$(azureSubscription)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          az group create --name $(resourceGroup) --location "$(location)"
+          az deployment group create \
+            --resource-group $(resourceGroup) \
+            --template-file infra/acr.bicep \
+            --parameters acrName=$(acrName)
+
+  - job: DeployAKS
+    displayName: Deploy AKS and Namespaces
+    dependsOn: DeployACR
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: '$(azureSubscription)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          ACR_ID=$(az acr show --name $(acrName) --resource-group $(resourceGroup) --query id -o tsv)
+          az deployment group create \
+            --resource-group $(resourceGroup) \
+            --template-file infra/aks.bicep \
+            --parameters aksName=$(aksCluster) acrResourceId=$ACR_ID
+
+- stage: Build
+  dependsOn: ProvisionInfra
+  displayName: Build and Push Docker Image
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: Docker@2
+      inputs:
+        command: buildAndPush
+        containerRegistry: '$(acrServiceConnection)'
+        repository: '$(projectName)'
+        dockerfile: '**/Dockerfile'
+        tags: |
+          $(tag)
+
+- stage: Deploy_$(environment)
+  dependsOn: Build
+  jobs:
+  - deployment: DeployApp
+    environment: '$(environment)'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: Kubernetes@1
+            inputs:
+              connectionType: 'Azure Resource Manager'
+              azureSubscriptionEndpoint: '$(azureSubscription)'
+              azureResourceGroup: '$(resourceGroup)'
+              kubernetesCluster: '$(aksCluster)'
+              namespace: '$(environment)'
+              command: apply
+              useConfigurationFile: true
+              configuration: 'k8s/deployment.yaml'
+              secretType: 'None'
+
+---
